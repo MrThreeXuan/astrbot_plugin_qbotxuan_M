@@ -144,8 +144,8 @@ class MarryAdvancedPlugin(Star):
         except:
             return user_id
 
+    # 管理员权限方法保留但不再使用（可删除，此处保留以备后续可能）
     async def _is_admin(self, event: AstrMessageEvent) -> bool:
-        """检查发送者是否为群管理员或群主"""
         group_id = event.get_group_id()
         user_id = event.get_sender_id()
         if not group_id:
@@ -200,11 +200,7 @@ class MarryAdvancedPlugin(Star):
 
     @filter.command("request_pool")
     async def request_pool(self, event: AstrMessageEvent):
-        """查看指定群的当日配对列表，用法：request_pool 群号（仅限管理员）"""
-        if not await self._is_admin(event):
-            yield event.plain_result("你没有权限使用此指令。")
-            return
-
+        """查看指定群的当日配对列表，用法：request_pool 群号（所有群成员可用）"""
         parts = event.message_str.strip().split()
         if len(parts) < 2:
             yield event.plain_result("请指定群号：request_pool 群号")
@@ -251,11 +247,7 @@ class MarryAdvancedPlugin(Star):
 
     @filter.command("forbid_couple")
     async def forbid_couple(self, event: AstrMessageEvent):
-        """禁止两个QQ号配对，用法：forbid_couple QQ1 QQ2（仅限管理员）"""
-        if not await self._is_admin(event):
-            yield event.plain_result("你没有权限使用此指令。")
-            return
-
+        """禁止两个QQ号配对，用法：forbid_couple QQ1 QQ2（所有群成员可用）"""
         parts = event.message_str.strip().split()
         if len(parts) < 3:
             yield event.plain_result("请指定两个QQ号：forbid_couple QQ1 QQ2")
