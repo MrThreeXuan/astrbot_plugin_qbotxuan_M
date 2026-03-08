@@ -1,6 +1,6 @@
 name: astrbot_plugin_qbotxuan_marry
 display_name: marry_command
 desc: 在群聊中发送“marry”指令，可以获取每日更新的“群友老婆”。
-version: v1.2.1
+version: v1.2.2
 author: Mr_ThreeXuan
 repo: https://github.com/MrThreeXuan/astrbot_plugin_xuan_marry
