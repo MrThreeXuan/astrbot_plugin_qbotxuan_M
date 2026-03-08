@@ -6,7 +6,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api.message_components import Plain, Image
 
-@register("astrbot_plugin_marry_advanced", "你的名字", "每日随机配对群友，支持禁止组合、查看列表与设置情侣", "1.0.0")
+@register("astrbot_plugin_marry_advanced", "你的名字", "每日随机配对群友，支持禁止组合、预设情侣", "1.0.0")
 class MarryAdvancedPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -15,14 +15,14 @@ class MarryAdvancedPlugin(Star):
         os.makedirs(self.data_dir, exist_ok=True)
         self.marry_file = os.path.join(self.data_dir, 'marry_data.json')
         self.forbid_file = os.path.join(self.data_dir, 'forbidden.json')
-        self.forced_file = os.path.join(self.data_dir, 'forced.json')   # 新增：强制情侣文件
+        self.couple_file = os.path.join(self.data_dir, 'couples.json')  # 新增预设情侣存储
         self._load_data()
 
     def _load_data(self):
-        """加载配对数据、禁止列表和强制情侣列表"""
+        """加载配对数据、禁止列表和预设情侣"""
         self.marry_data = self._read_json(self.marry_file)
         self.forbidden = self._read_json(self.forbid_file)
-        self.forced = self._read_json(self.forced_file)                 # 加载强制情侣
+        self.couples = self._read_json(self.couple_file)  # 格式: {group_id: [[uid1, uid2], ...]}
 
     def _save_marry_data(self):
         self._write_json(self.marry_file, self.marry_data)
@@ -30,8 +30,8 @@ class MarryAdvancedPlugin(Star):
     def _save_forbidden(self):
         self._write_json(self.forbid_file, self.forbidden)
 
-    def _save_forced(self):
-        self._write_json(self.forced_file, self.forced)                 # 保存强制情侣
+    def _save_couples(self):
+        self._write_json(self.couple_file, self.couples)
 
     def _read_json(self, file_path: str) -> dict:
         if not os.path.exists(file_path):
@@ -56,14 +56,6 @@ class MarryAdvancedPlugin(Star):
         group_forbid = self.forbidden.get(str(group_id), [])
         pair = tuple(sorted([uid1, uid2]))
         return any(tuple(sorted(p)) == pair for p in group_forbid)
-
-    def _is_forced(self, group_id: str, uid1: str, uid2: str) -> bool:
-        """检查两个用户是否被设为强制情侣"""
-        if uid1 == uid2:
-            return False
-        group_forced = self.forced.get(str(group_id), [])
-        pair = sorted([uid1, uid2])
-        return pair in group_forced
 
     def _build_avatar_url(self, user_id: str) -> str:
         return f"https://q.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640"
@@ -96,36 +88,37 @@ class MarryAdvancedPlugin(Star):
     async def _generate_pairs_for_group(self, group_id: str, members: list):
         """
         为给定群生成当日配对，返回 {uid: mate_uid} 映射，保证双射。
-        优先处理强制情侣（forced），剩余成员随机配对，并遵守禁止列表。
+        优先分配预设情侣，剩余成员随机配对。
         """
         member_ids = [m['user_id'] for m in members]
-        # 获取本群强制情侣对
-        group_forced = self.forced.get(str(group_id), [])
-        # 构建强制映射，确保不冲突
-        forced_map = {}
-        used_forced = set()
-        for a, b in group_forced:
-            if a in used_forced or b in used_forced:
-                continue  # 忽略冲突（数据异常，但容错）
-            if a not in member_ids or b not in member_ids:
-                continue  # 成员已退群，忽略该强制对
-            forced_map[a] = b
-            forced_map[b] = a
-            used_forced.add(a)
-            used_forced.add(b)
-
-        # 剩余成员（未被强制配对的）
-        remaining = [uid for uid in member_ids if uid not in used_forced]
-
-        # 对剩余成员随机配对，考虑禁止列表
+        # 获取本群预设情侣（双方都在群内且未被禁止）
+        group_couples = self.couples.get(str(group_id), [])
+        valid_couples = []
+        used = set()
+        for a, b in group_couples:
+            a, b = str(a), str(b)
+            if a in member_ids and b in member_ids and not self._is_forbidden(group_id, a, b):
+                valid_couples.append((a, b))
+        # 分配预设情侣，避免冲突（一个人只能在一对中）
+        assigned_pairs = {}
+        for a, b in valid_couples:
+            if a in used or b in used:
+                continue
+            assigned_pairs[a] = b
+            assigned_pairs[b] = a
+            used.add(a)
+            used.add(b)
+        # 剩余成员
+        remaining = [uid for uid in member_ids if uid not in used]
+        # 对剩余成员进行随机配对（考虑禁止列表）
         random.shuffle(remaining)
-        pairs = forced_map.copy()  # 先加入强制对
-
         # 尝试最多100次随机打乱，找到合法配对
+        final_pairs = assigned_pairs.copy()
         for attempt in range(100):
             random.shuffle(remaining)
             valid = True
             temp_pairs = {}
+            # 处理剩余成员（两两配对）
             for i in range(0, len(remaining), 2):
                 if i + 1 < len(remaining):
                     a, b = remaining[i], remaining[i + 1]
@@ -135,22 +128,23 @@ class MarryAdvancedPlugin(Star):
                     temp_pairs[a] = b
                     temp_pairs[b] = a
                 else:
+                    # 奇数，最后一人单身
                     last = remaining[i]
                     temp_pairs[last] = last
             if valid:
-                pairs.update(temp_pairs)
+                final_pairs.update(temp_pairs)
                 break
         else:
-            # 100次都失败，忽略禁止强制配对（降级处理）
+            # 100次都失败，忽略禁止强制配对（仅用于剩余成员）
             for i in range(0, len(remaining), 2):
                 if i + 1 < len(remaining):
                     a, b = remaining[i], remaining[i + 1]
-                    pairs[a] = b
-                    pairs[b] = a
+                    final_pairs[a] = b
+                    final_pairs[b] = a
                 else:
                     last = remaining[i]
-                    pairs[last] = last
-        return pairs
+                    final_pairs[last] = last
+        return final_pairs
 
     async def _ensure_pairs(self, bot, group_id: str, today: str):
         """确保当天配对已生成，若未生成则生成并保存"""
@@ -177,7 +171,8 @@ class MarryAdvancedPlugin(Star):
         except:
             return user_id
 
-    # ---------- 指令部分 ----------
+    # ==================== 指令部分 ====================
+
     @filter.command("marry")
     async def marry(self, event: AstrMessageEvent):
         """今日随机匹配一名群友作为老婆"""
@@ -282,11 +277,6 @@ class MarryAdvancedPlugin(Star):
             yield event.plain_result("该指令只能在群聊中使用。")
             return
 
-        # 检查是否已是强制情侣，若是则提示先解除强制
-        if self._is_forced(group_id, uid1, uid2):
-            yield event.plain_result("该对已设为强制情侣，请先使用取消情侣指令（暂未实现）后再禁止。")
-            return
-
         self._load_data()
         group_forbid = self.forbidden.get(str(group_id), [])
         pair = sorted([uid1, uid2])
@@ -316,7 +306,7 @@ class MarryAdvancedPlugin(Star):
 
     @filter.command("couple_set")
     async def couple_set(self, event: AstrMessageEvent):
-        """设置两个QQ号为固定情侣，用法：couple_set QQ1 QQ2（所有群成员可用）"""
+        """设置预设情侣，用法：couple_set QQ1 QQ2（所有群成员可用）"""
         parts = event.message_str.strip().split()
         if len(parts) < 3:
             yield event.plain_result("请指定两个QQ号：couple_set QQ1 QQ2")
@@ -326,7 +316,7 @@ class MarryAdvancedPlugin(Star):
             yield event.plain_result("QQ号必须为数字")
             return
         if uid1 == uid2:
-            yield event.plain_result("不能设置自己与自己为情侣。")
+            yield event.plain_result("不能将自己设为自己情侣。")
             return
 
         group_id = event.get_group_id()
@@ -334,55 +324,73 @@ class MarryAdvancedPlugin(Star):
             yield event.plain_result("该指令只能在群聊中使用。")
             return
 
-        bot = event.bot
-        if not bot:
-            yield event.plain_result("无法获取机器人实例")
+        self._load_data()
+        group_couples = self.couples.get(str(group_id), [])
+        pair = sorted([uid1, uid2])
+        if pair in group_couples:
+            yield event.plain_result("该组合已是预设情侣。")
             return
 
-        # 检查两个QQ号是否都在群成员中
+        group_couples.append(pair)
+        self.couples[str(group_id)] = group_couples
+        self._save_couples()
+
+        # 重新生成今日配对以立即生效
+        today = str(date.today())
+        key = f"{group_id}_{today}"
+        bot = event.bot
         try:
             members = await self._get_group_members(bot, group_id)
+            if len(members) >= 2:
+                pairs = await self._generate_pairs_for_group(group_id, members)
+                self.marry_data[key] = pairs
+                self._save_marry_data()
+                yield event.plain_result(f"已设置 {uid1} 和 {uid2} 为预设情侣，今日配对已重新生成。")
+            else:
+                yield event.plain_result("群成员不足，无法重新生成配对。")
         except Exception as e:
-            yield event.plain_result(f"获取群成员失败：{e}")
-            return
-        member_ids = [m['user_id'] for m in members]
-        if uid1 not in member_ids:
-            yield event.plain_result(f"QQ号 {uid1} 不在本群成员列表中。")
-            return
-        if uid2 not in member_ids:
-            yield event.plain_result(f"QQ号 {uid2} 不在本群成员列表中。")
-            return
+            yield event.plain_result(f"重新生成配对失败：{e}")
 
-        self._load_data()  # 重新加载强制列表
-        group_forced = self.forced.get(str(group_id), [])
-
-        # 检查是否与现有强制情侣冲突
-        for a, b in group_forced:
-            if uid1 in [a, b] or uid2 in [a, b]:
-                if sorted([uid1, uid2]) == sorted([a, b]):
-                    yield event.plain_result("该情侣关系已经设置过了。")
-                    return
-                else:
-                    yield event.plain_result(f"设置失败：{uid1} 或 {uid2} 已与其他用户存在情侣关系。")
-                    return
-
-        # 检查是否在禁止列表中
-        if self._is_forbidden(group_id, uid1, uid2):
-            yield event.plain_result("该对目前在禁止列表中，请先使用 forbid_couple 解除禁止后再设置情侣。")
+    @filter.command("couple_del")
+    async def couple_del(self, event: AstrMessageEvent):
+        """移除预设情侣，用法：couple_del QQ1 QQ2（所有群成员可用）"""
+        parts = event.message_str.strip().split()
+        if len(parts) < 3:
+            yield event.plain_result("请指定两个QQ号：couple_del QQ1 QQ2")
+            return
+        uid1, uid2 = parts[1], parts[2]
+        if not uid1.isdigit() or not uid2.isdigit():
+            yield event.plain_result("QQ号必须为数字")
             return
 
-        # 添加强制情侣对
-        group_forced.append([uid1, uid2])
-        self.forced[str(group_id)] = group_forced
-        self._save_forced()
+        group_id = event.get_group_id()
+        if not group_id:
+            yield event.plain_result("该指令只能在群聊中使用。")
+            return
+
+        self._load_data()
+        group_couples = self.couples.get(str(group_id), [])
+        pair = sorted([uid1, uid2])
+        if pair not in group_couples:
+            yield event.plain_result("该组合不在预设情侣列表中。")
+            return
+
+        group_couples.remove(pair)
+        self.couples[str(group_id)] = group_couples
+        self._save_couples()
 
         # 重新生成今日配对
         today = str(date.today())
         key = f"{group_id}_{today}"
+        bot = event.bot
         try:
-            pairs = await self._generate_pairs_for_group(group_id, members)
-            self.marry_data[key] = pairs
-            self._save_marry_data()
-            yield event.plain_result(f"已设置 {uid1} 和 {uid2} 为情侣，今日配对已重新生成。")
+            members = await self._get_group_members(bot, group_id)
+            if len(members) >= 2:
+                pairs = await self._generate_pairs_for_group(group_id, members)
+                self.marry_data[key] = pairs
+                self._save_marry_data()
+                yield event.plain_result(f"已移除 {uid1} 和 {uid2} 的预设情侣关系，今日配对已重新生成。")
+            else:
+                yield event.plain_result("群成员不足，无法重新生成配对。")
         except Exception as e:
             yield event.plain_result(f"重新生成配对失败：{e}")
